@@ -14,8 +14,10 @@ import streamlit as st
 import config
 from core.audio     import load_audio, duration
 from core.model     import load_yamnet, run_inference
+from core.spl       import compute_spl
 from core.visualize import (waveform_fig, spectrogram_fig,
-                             scores_heatmap_fig, top_n_bars_fig)
+                             scores_heatmap_fig, top_n_bars_fig,
+                             spl_fig)
 from ui.upload      import audio_input
 from ui.metrics     import render_metrics
 
@@ -53,7 +55,6 @@ st.markdown("""
 # ── Load model ─────────────────────────────────────────────────────────────────
 _, class_names, params = load_yamnet()
 
-
 # ── Header ─────────────────────────────────────────────────────────────────────
 st.markdown(f"""
 <div style="text-align:center; padding: 1.5rem 0 1rem 0;">
@@ -84,7 +85,7 @@ if audio_bytes:
     mean_scores   = np.mean(scores, axis=0)
     patch_padding = (params.patch_window_seconds / 2) / params.patch_hop_seconds
 
-    # audio player + metrics
+    # ── Metrics ────────────────────────────────────────────────────────────────
     st.audio(audio_bytes)
     st.markdown(" ")
     render_metrics(
@@ -96,7 +97,7 @@ if audio_bytes:
 
     st.markdown("---")
 
-    # row 1 — waveform + spectrogram
+    # ── Row 1: waveform + spectrogram ──────────────────────────────────────────
     col_w, col_s = st.columns(2)
     with col_w:
         st.markdown("#### Waveform")
@@ -107,13 +108,12 @@ if audio_bytes:
 
     st.markdown("---")
 
-    # top-N slider — lives here, above the charts it controls
+    # ── Row 2: scores heatmap + top-N bars ─────────────────────────────────────
     top_n       = st.slider("Top-N classes", min_value=3,
                              max_value=config.TOP_N_MAX,
                              value=config.TOP_N_DEFAULT)
     top_indices = list(np.argsort(mean_scores)[::-1][:top_n])
 
-    # row 2 — heatmap + bars
     col_h, col_b = st.columns([2, 1])
     with col_h:
         st.markdown("#### Class scores over time")
@@ -127,6 +127,58 @@ if audio_bytes:
             top_n_bars_fig(mean_scores, top_indices, class_names),
             use_container_width=True,
         )
+
+    st.markdown("---")
+
+    # ── Row 3: SPL analysis ────────────────────────────────────────────────────
+    st.markdown("#### SPL analysis")
+
+    spl_col1, spl_col2, spl_col3 = st.columns([1, 1, 3])
+
+    with spl_col1:
+        fraction = st.radio(
+            "Resolution",
+            options=[1, 3],
+            format_func=lambda x: "Octave (1/1)" if x == 1 else "1/3 Octave",
+            index=0 if config.SPL_FRACTION_DEFAULT == 1 else 1,
+            horizontal=False,
+        )
+
+    with spl_col2:
+        spl_mode = st.radio(
+            "Level scale",
+            options=["dbfs", "spl"],
+            format_func=lambda x: "dBFS (digital)" if x == "dbfs" else "dB SPL (acoustic)",
+            index=0 if config.SPL_MODE_DEFAULT == "dbfs" else 1,
+            horizontal=False,
+        )
+
+    with spl_col3:
+        if spl_mode == "spl":
+            st.info("For accurate dB SPL you need a calibrated microphone. "
+                    "Enter your calibration factor below (default = 1.0).")
+            cal_factor = st.number_input(
+                "Calibration factor", min_value=0.0001,
+                max_value=100.0, value=1.0, step=0.001,
+                format="%.4f",
+            )
+        else:
+            cal_factor = 1.0
+            st.caption("dBFS — levels relative to digital full scale. "
+                       "0 dBFS = maximum possible digital level.")
+
+    with st.spinner("Computing SPL…"):
+        spl_vals, spl_freqs = compute_spl(
+            waveform, sr,
+            fraction=fraction,
+            mode=spl_mode,
+            calibration_factor=cal_factor,
+        )
+
+    st.plotly_chart(
+        spl_fig(spl_vals, spl_freqs, spl_mode, fraction),
+        use_container_width=True,
+    )
 
 else:
     st.info("Drop a WAV file or record from your microphone above to get started.")
