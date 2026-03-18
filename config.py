@@ -14,14 +14,16 @@ WEIGHTS_PATH   = ASSETS_DIR / "yamnet.h5"
 CLASS_MAP_PATH = ASSETS_DIR / "yamnet_class_map.csv"
 
 # ── Model ──────────────────────────────────────────────────────────────────────
-SAMPLE_RATE    = 16_000
+SAMPLE_RATE    = 16_000   # Hz — required by YAMNet (resampled)
 TOP_N_DEFAULT  = 5
 TOP_N_MAX      = 20
 
 # ── SPL analysis ───────────────────────────────────────────────────────────────
-SPL_FREQ_LIMITS      = [20, 8000]   # Hz — limits for octave filter bank
+# Upper limit is set high — PyOctaveBand will cap it at Nyquist (sr/2)
+# so the actual bands shown depend on the original audio sample rate
+SPL_FREQ_LIMITS      = [16, 20000]
 SPL_FRACTION_DEFAULT = 1            # 1 = octave, 3 = 1/3 octave
-SPL_MODE_DEFAULT     = "dbfs"       # "dbfs" or "spl"
+SPL_MODE_DEFAULT     = "spl"
 
 # ── Colours ────────────────────────────────────────────────────────────────────
 PRIMARY_COLOR  = "#8B6F47"
@@ -30,7 +32,6 @@ CHART_COLORS   = [
     "#9FE1CB", "#1D9E75", "#D85A30", "#F0997B",
     "#185FA5", "#85B7EB",
 ]
-SPL_BAR_COLOR  = "#1D9E75"
 
 # ── UI ─────────────────────────────────────────────────────────────────────────
 PAGE_TITLE    = "YAMNet Prediction"

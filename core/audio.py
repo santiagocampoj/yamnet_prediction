@@ -2,7 +2,10 @@
 core/audio.py
 -------------
 Audio loading and preprocessing utilities.
-No Streamlit or model imports here — pure audio logic.
+
+Returns two independent waveforms:
+  - waveform_yamnet : mono float32 at 16kHz  — for YAMNet
+  - waveform_orig   : mono float32 at original sr — for SPL analysis
 """
 
 import io
@@ -15,30 +18,35 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
 
 
-def load_audio(audio_bytes: bytes) -> tuple[np.ndarray, int]:
+def load_audio(audio_bytes: bytes) -> tuple[np.ndarray, int, np.ndarray, int]:
     """
-    Load audio from raw bytes, convert to mono float32 at SAMPLE_RATE.
+    Load audio from raw bytes.
 
     Returns
     -------
-    waveform : np.ndarray  float32, shape (n_samples,)
-    sr       : int         sample rate after resampling
+    waveform_yamnet : float32 mono at 16kHz
+    sr_yamnet       : 16000
+    waveform_orig   : float32 mono at original sample rate
+    sr_orig         : original sample rate
     """
-    wav_data, sr = sf.read(io.BytesIO(audio_bytes), dtype=np.int16)
-    waveform     = (wav_data / 32768.0).astype("float32")
+    wav_data, sr_orig = sf.read(io.BytesIO(audio_bytes), dtype=np.int16)
+    waveform = (wav_data / 32768.0).astype("float32")
 
     # mono
     if len(waveform.shape) > 1:
         waveform = np.mean(waveform, axis=1)
 
-    # resample to 16kHz if needed
-    if sr != config.SAMPLE_RATE:
-        waveform = resampy.resample(waveform, sr, config.SAMPLE_RATE)
-        sr       = config.SAMPLE_RATE
+    waveform_orig = waveform.copy()
 
-    return waveform, sr
+    # resample to 16kHz for YAMNet
+    if sr_orig != config.SAMPLE_RATE:
+        waveform_yamnet = resampy.resample(waveform, sr_orig, config.SAMPLE_RATE)
+    else:
+        waveform_yamnet = waveform.copy()
+
+    return waveform_yamnet, config.SAMPLE_RATE, waveform_orig, sr_orig
 
 
-def duration(waveform: np.ndarray) -> float:
+def duration(waveform: np.ndarray, sr: int) -> float:
     """Return duration in seconds."""
-    return len(waveform) / config.SAMPLE_RATE
+    return len(waveform) / sr
