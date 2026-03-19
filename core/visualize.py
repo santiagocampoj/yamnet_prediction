@@ -307,3 +307,49 @@ def embedding_fig(
         height=500,
     )
     return fig
+
+
+def confusion_matrix_fig(cm: list, classes: list) -> go.Figure:
+    """
+    Interactive Plotly confusion matrix with hover details.
+    Shows both raw counts and row-normalized percentages on hover.
+    """
+    cm_arr   = np.array(cm)
+    n        = len(classes)
+    row_sums = cm_arr.sum(axis=1, keepdims=True)
+    cm_pct   = np.where(row_sums > 0, cm_arr / row_sums * 100, 0)
+
+    hover = [[
+        f"<b>True:</b> {classes[i]}<br>"
+        f"<b>Predicted:</b> {classes[j]}<br>"
+        f"<b>Count:</b> {cm_arr[i, j]}<br>"
+        f"<b>Row %:</b> {cm_pct[i, j]:.1f}%"
+        for j in range(n)]
+        for i in range(n)]
+
+    text = [[
+        f"{cm_arr[i,j]}<br><span style='font-size:10px'>{cm_pct[i,j]:.0f}%</span>"
+        for j in range(n)]
+        for i in range(n)]
+
+    fig = go.Figure(go.Heatmap(
+        z=cm_pct, x=classes, y=classes,
+        colorscale="Blues", zmin=0, zmax=100,
+        text=text, texttemplate="%{text}",
+        textfont=dict(size=12),
+        hovertext=hover,
+        hovertemplate="%{hovertext}<extra></extra>",
+        colorbar=dict(title="Row %", thickness=12),
+        showscale=True,
+    ))
+    fig.update_xaxes(title="Predicted", side="bottom",
+                     tickangle=-35, showgrid=False)
+    fig.update_yaxes(title="True", autorange="reversed", showgrid=False)
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(size=11),
+        margin=dict(t=20, b=80, l=100, r=60),
+        height=max(350, n * 60),
+    )
+    return fig

@@ -13,7 +13,6 @@ Run:
 import os
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import streamlit as st
 import plotly.graph_objects as go
 
@@ -24,9 +23,11 @@ from core.spl        import compute_spl, compute_spl_time
 from core.embeddings import project_with_references, has_umap
 from core.visualize  import (waveform_fig, spectrogram_fig,
                               scores_heatmap_fig, top_n_bars_fig,
-                              spl_fig, spl_time_fig, embedding_fig)
-from ui.upload       import audio_input
-from ui.metrics      import render_metrics
+                              spl_fig, spl_time_fig, embedding_fig,
+                              confusion_matrix_fig)
+from ui.upload            import audio_input
+from ui.metrics           import render_metrics
+from ui.training_dashboard import StreamlitTrainingDashboard
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -54,6 +55,12 @@ st.markdown("""
     border-color: rgba(139,111,71,0.8);
     background: rgba(139,111,71,0.08);
   }
+  button[data-baseweb="tab"] p {
+    font-size: 1.6rem !important;
+    font-weight: 500 !important;
+  }
+  button[data-baseweb="tab"] { padding: 14px 48px !important; }
+  [data-baseweb="tab-list"] { justify-content: center !important; gap: 12px !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -74,22 +81,6 @@ st.markdown(f"""
 
 st.markdown("---")
 
-# ── Tabs ───────────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-  button[data-baseweb="tab"] p {
-    font-size: 1.6rem !important;
-    font-weight: 500 !important;
-  }
-  button[data-baseweb="tab"] {
-    padding: 14px 48px !important;
-  }
-  [data-baseweb="tab-list"] {
-    justify-content: center !important;
-    gap: 12px !important;
-  }
-</style>
-""", unsafe_allow_html=True)
 tab_analysis, tab_training, tab_results = st.tabs([
     "📊  Analysis",
     "🏋️  Training",
@@ -107,7 +98,6 @@ with tab_analysis:
 
     if audio_bytes:
         st.session_state["audio_bytes"] = audio_bytes
-
     audio_bytes = st.session_state.get("audio_bytes")
 
     if audio_bytes:
@@ -195,8 +185,9 @@ with tab_analysis:
                 spl_time_fig(lv, sf, ta, "spl", fraction, time_mode),
                 use_container_width=True)
             with st.expander("Show RMS summary"):
-                sv, _ = compute_spl(waveform_orig, sr_orig, fraction=fraction,
-                                     mode="spl", calibration_factor=cal_factor)
+                sv, _ = compute_spl(waveform_orig, sr_orig,
+                                     fraction=fraction, mode="spl",
+                                     calibration_factor=cal_factor)
                 st.plotly_chart(spl_fig(sv, sf, "spl", fraction),
                                 use_container_width=True)
 
@@ -260,8 +251,6 @@ with tab_training:
                             ["ESC-50 (download)", "My own audio folder"],
                             horizontal=True, key="tr_source")
 
-    folds_available = False   # will be set True for ESC-50
-
     if data_source == "ESC-50 (download)":
         from core.esc50 import (is_downloaded, download, available_classes,
                                  prepare_train_folder, get_metadata,
@@ -285,7 +274,6 @@ with tab_training:
             df      = get_metadata()
             all_cls = available_classes()
 
-            # class distribution chart
             with st.expander("Browse dataset"):
                 dist = df["category"].value_counts().reset_index()
                 dist.columns = ["class","count"]
@@ -326,17 +314,13 @@ with tab_training:
                 cols = st.columns(min(len(selected), 6))
                 for i, cls in enumerate(selected):
                     cols[i % len(cols)].metric(cls, cnt.get(cls, 0))
-
-                st.info("ESC-50 folds will be used for train/val/test split:\n"
-                        "folds 1-3 = train · fold 4 = val · fold 5 = test")
+                st.info("ESC-50 folds: **1-3 = train · 4 = val · 5 = test**")
                 st.session_state["tr_selected_classes"] = selected
                 st.session_state["tr_use_esc50_folds"]  = True
-                folds_available = True
 
     else:
         st.info("Point to a folder with one subfolder per class:\n"
-                "`my_data/dog/*.wav`, `my_data/cat/*.wav`, etc.\n\n"
-                "Clips will be split 70/15/15 by clip (not by frame).")
+                "`my_data/dog/*.wav`, `my_data/cat/*.wav`, etc.")
         custom_dir = st.text_input("Folder path", "./data/train",
                                     key="tr_custom")
         if os.path.isdir(custom_dir):
@@ -345,8 +329,8 @@ with tab_training:
             if classes_found:
                 st.success(f"Found {len(classes_found)} classes: "
                            f"{', '.join(sorted(classes_found))}")
-                st.session_state["tr_data_dir"]         = custom_dir
-                st.session_state["tr_use_esc50_folds"]  = False
+                st.session_state["tr_data_dir"]        = custom_dir
+                st.session_state["tr_use_esc50_folds"] = False
         elif custom_dir:
             st.error("Folder not found.")
 
@@ -357,18 +341,16 @@ with tab_training:
     train_mode = st.radio(
         "Mode", ["Feature extraction", "Fine-tune YAMNet"],
         horizontal=True, key="tr_mode",
-        help="Feature extraction: frozen YAMNet + small dense head (fast, few data). "
-             "Fine-tune: unfreeze last N YAMNet layers (slower, more accurate).")
+        help="Feature extraction: frozen YAMNet + dense head. "
+             "Fine-tune: unfreeze last N YAMNet layers.")
 
     c1, c2 = st.columns(2)
     with c1:
-        epochs    = st.slider("Max epochs", 5, 100, 20, key="tr_epochs")
+        epochs     = st.slider("Max epochs", 5, 100, 20, key="tr_epochs")
         use_frames = st.toggle(
             "Use all frames per clip (Google tutorial style)",
-            value=True,
-            help="If on, each ~96ms frame is a separate training sample. "
-                 "If off, one mean embedding per clip (faster, less data).")
-        out_model = st.text_input(
+            value=True, key="tr_frames")
+        out_model  = st.text_input(
             "Save model to",
             "./models/classifier" if train_mode == "Feature extraction"
             else "./models/finetune",
@@ -397,7 +379,7 @@ with tab_training:
     # ── Step 3: Train ──────────────────────────────────────────────────────────
     st.markdown("#### Step 3 — Train")
 
-    ready = (st.session_state.get("tr_use_esc50_folds") is not None)
+    ready = st.session_state.get("tr_use_esc50_folds") is not None
     if not ready:
         st.warning("Complete Step 1 first.")
     else:
@@ -410,17 +392,17 @@ with tab_training:
             if use_esc50:
                 from core.esc50 import load_dataset_with_folds
                 selected = st.session_state["tr_selected_classes"]
-                st.info(f"Loading ESC-50 classes: {selected}")
+                st.info(f"Loading ESC-50: {selected}")
                 prog = st.progress(0, "Loading audio…")
                 waveforms, labels, folds = load_dataset_with_folds(
                     selected,
-                    progress_callback=lambda i, t:
+                    progress_callback=lambda i,t:
                         prog.progress(i/t, f"Loading {i}/{t}…"))
                 prog.empty()
             else:
                 data_dir  = st.session_state["tr_data_dir"]
                 waveforms, labels = load_dataset_from_folder(data_dir)
-                folds     = None
+                folds = None
 
             if not waveforms:
                 st.error("No audio files found."); st.stop()
@@ -429,17 +411,25 @@ with tab_training:
             st.success(f"Loaded {len(waveforms)} clips · "
                        f"{len(classes)} classes: {classes}")
 
+            # ── Live training dashboard ────────────────────────────────────────
+            st.markdown("##### Training progress")
+            dashboard_container = st.container()
+            dashboard = StreamlitTrainingDashboard(
+                total_epochs=epochs,
+                container=dashboard_container,
+            )
+
             metrics_list = []
-            prog2 = st.progress(0, "Extracting embeddings…")
 
             if train_mode == "Feature extraction":
+                prog2 = st.progress(0, "Extracting embeddings…")
                 model, le, history, X_tr, y_tr, report = train(
                     waveforms, labels,
                     folds=folds,
                     epochs=epochs,
                     use_frame_embeddings=use_frames,
                     metrics_list=metrics_list,
-                    progress_callback=lambda i, t:
+                    progress_callback=lambda i,t:
                         prog2.progress(i/t, f"Embedding {i}/{t}…"),
                 )
                 prog2.empty()
@@ -447,15 +437,19 @@ with tab_training:
                 st.session_state["res_metrics_clf"] = metrics_list
 
             else:
-                # from core.finetuning import train_finetune
                 from core.finetuning import train_finetune
+                prog2 = st.progress(0, "Extracting embeddings…")
+                model, le, history, report = train_finetune(
+                    waveforms, labels,
+                    folds=folds,
+                    n_unfreeze=n_unfreeze,
+                    epochs=epochs,
+                    learning_rate=lr_map[lr_label],
+                    metrics_list=metrics_list,
+                    progress_callback=lambda i,t:
+                        prog2.progress(i/t, f"Embedding {i}/{t}…"),
+                )
                 prog2.empty()
-                with st.spinner("Fine-tuning…"):
-                    model, le, history, report = train_finetune(
-                        waveforms, np.array(labels),
-                        n_unfreeze=n_unfreeze, epochs=epochs,
-                        learning_rate=lr_map[lr_label],
-                        metrics_list=metrics_list)
                 os.makedirs(out_model, exist_ok=True)
                 model.save(os.path.join(out_model, "finetune_model.keras"))
                 st.session_state["res_metrics_ft"] = metrics_list
@@ -474,10 +468,8 @@ with tab_training:
             test_acc  = report.get("test_accuracy", "—")
             test_loss = report.get("test_loss", "—")
             st.success(
-                f"✅ Training complete!  "
-                f"Test accuracy: **{test_acc}%** · "
-                f"Test loss: **{test_loss}**  "
-                f"→ go to **📈 Results**")
+                f"✅ Done! Test accuracy: **{test_acc}%** · "
+                f"Test loss: **{test_loss}** → go to **📈 Results**")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -488,14 +480,13 @@ with tab_results:
     if not st.session_state.get("res_trained"):
         st.info("Train a model in the **🏋️ Training** tab first.")
     else:
+        r       = st.session_state["res_report"]
         metrics = st.session_state["res_metrics"]
         classes = st.session_state["res_classes"]
         cm      = st.session_state["res_cm"]
-        report  = st.session_state["res_report"].get("report", {})
+        report  = r.get("report", {})
         mode    = st.session_state["res_mode"]
 
-        # summary metrics
-        r = st.session_state["res_report"]
         c1, c2, c3 = st.columns(3)
         c1.metric("Test accuracy", f"{r.get('test_accuracy','—')}%")
         c2.metric("Test loss",     r.get("test_loss", "—"))
@@ -509,51 +500,89 @@ with tab_results:
             "⚖️ Compare strategies",
         ])
 
-        # ── curves ─────────────────────────────────────────────────────────────
+        # ── Training curves ─────────────────────────────────────────────────
         with r1:
-            if metrics:
-                df   = pd.DataFrame(metrics)
-                best = df.loc[df["val_acc"].idxmax()]
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Best val accuracy", f"{best['val_acc']:.1f}%")
-                c2.metric("At epoch",          int(best["epoch"]))
-                c3.metric("Val loss",          f"{best['val_loss']:.4f}")
+          if metrics:
+              df   = pd.DataFrame(metrics)
+              best = df.loc[df["val_acc"].idxmax()]
+              c1, c2, c3 = st.columns(3)
+              c1.metric("Best val accuracy", f"{best['val_acc']:.1f}%")
+              c2.metric("At epoch",          int(best["epoch"]))
+              c3.metric("Val loss",          f"{best['val_loss']:.4f}")
 
-                fig, (a1, a2) = plt.subplots(1, 2, figsize=(10, 3))
-                a1.plot(df["epoch"], df["acc"],     label="train",
-                        color=config.CHART_COLORS[0])
-                a1.plot(df["epoch"], df["val_acc"], label="val",
-                        color=config.CHART_COLORS[1], ls="--")
-                a1.set_title("Accuracy (%)"); a1.legend(); a1.grid(alpha=0.3)
-                a2.plot(df["epoch"], df["loss"],     label="train",
-                        color=config.CHART_COLORS[2])
-                a2.plot(df["epoch"], df["val_loss"], label="val",
-                        color=config.CHART_COLORS[3], ls="--")
-                a2.set_title("Loss"); a2.legend(); a2.grid(alpha=0.3)
-                fig.tight_layout()
-                st.pyplot(fig)
+              col_acc, col_loss = st.columns(2)
 
-        # ── confusion matrix ───────────────────────────────────────────────────
+              with col_acc:
+                  fig_acc = go.Figure()
+                  fig_acc.add_trace(go.Scatter(
+                      x=df["epoch"], y=df["acc"],
+                      name="Train", mode="lines+markers",
+                      line=dict(color="#1f77b4", width=2),
+                      marker=dict(size=5),
+                  ))
+                  fig_acc.add_trace(go.Scatter(
+                      x=df["epoch"], y=df["val_acc"],
+                      name="Val", mode="lines+markers",
+                      line=dict(color="#ff7f0e", width=2),
+                      marker=dict(size=5),
+                  ))
+                  fig_acc.update_layout(
+                      title="Accuracy (%)",
+                      paper_bgcolor="rgba(0,0,0,0)",
+                      plot_bgcolor="rgba(0,0,0,0)",
+                      height=300,
+                      margin=dict(t=40, b=40, l=50, r=20),
+                      xaxis=dict(title="Epoch", showgrid=True,
+                                gridcolor="rgba(128,128,128,0.12)"),
+                      yaxis=dict(title="Accuracy (%)", showgrid=True,
+                                gridcolor="rgba(128,128,128,0.12)"),
+                      legend=dict(orientation="h", y=-0.2),
+                  )
+                  st.plotly_chart(fig_acc, use_container_width=True)
+
+              with col_loss:
+                  fig_loss = go.Figure()
+                  fig_loss.add_trace(go.Scatter(
+                      x=df["epoch"], y=df["loss"],
+                      name="Train", mode="lines+markers",
+                      line=dict(color="#1f77b4", width=2),
+                      marker=dict(size=5),
+                  ))
+                  fig_loss.add_trace(go.Scatter(
+                      x=df["epoch"], y=df["val_loss"],
+                      name="Val", mode="lines+markers",
+                      line=dict(color="#ff7f0e", width=2),
+                      marker=dict(size=5),
+                  ))
+                  fig_loss.update_layout(
+                      title="Loss",
+                      paper_bgcolor="rgba(0,0,0,0)",
+                      plot_bgcolor="rgba(0,0,0,0)",
+                      height=300,
+                      margin=dict(t=40, b=40, l=50, r=20),
+                      xaxis=dict(title="Epoch", showgrid=True,
+                                gridcolor="rgba(128,128,128,0.12)"),
+                      yaxis=dict(title="Loss", showgrid=True,
+                                gridcolor="rgba(128,128,128,0.12)"),
+                      legend=dict(orientation="h", y=-0.2),
+                  )
+                  st.plotly_chart(fig_loss, use_container_width=True)
+
+              st.dataframe(
+                  df.rename(columns={
+                      "epoch":"Epoch","acc":"Train acc %",
+                      "val_acc":"Val acc %","loss":"Train loss",
+                      "val_loss":"Val loss"})
+                  .style.highlight_max(subset=["Val acc %"], color="#d4edda")
+                        .highlight_min(subset=["Val loss"],  color="#d4edda"),
+                  use_container_width=True, hide_index=True)
+
+        # ── Confusion matrix ─────────────────────────────────────────────────
         with r2:
             if cm:
-                cm_arr = np.array(cm)
-                n      = len(classes)
-                fig, ax = plt.subplots(figsize=(max(4, n), max(3, n)))
-                im = ax.imshow(cm_arr, cmap="Blues")
-                ax.set_xticks(range(n))
-                ax.set_xticklabels(classes, rotation=35, ha="right")
-                ax.set_yticks(range(n)); ax.set_yticklabels(classes)
-                ax.set_xlabel("Predicted"); ax.set_ylabel("True")
-                for i in range(n):
-                    for j in range(n):
-                        ax.text(j, i, str(cm_arr[i,j]),
-                                ha="center", va="center",
-                                color="white"
-                                if cm_arr[i,j] > cm_arr.max()/2
-                                else "black", fontsize=10)
-                fig.colorbar(im, ax=ax, fraction=0.046)
-                fig.tight_layout()
-                st.pyplot(fig)
+                st.plotly_chart(
+                    confusion_matrix_fig(cm, classes),
+                    use_container_width=True)
 
                 rows = [{"Class": c,
                          "Precision": f"{report[c]['precision']:.2f}",
@@ -561,12 +590,12 @@ with tab_results:
                          "F1":        f"{report[c]['f1-score']:.2f}",
                          "Support":   int(report[c]["support"])}
                         for c in classes if c in report]
-                st.dataframe(pd.DataFrame(rows), use_container_width=True)
+                st.dataframe(pd.DataFrame(rows),
+                             use_container_width=True, hide_index=True)
 
-        # ── predict new audio ──────────────────────────────────────────────────
+        # ── Predict new audio ─────────────────────────────────────────────────
         with r3:
-            st.markdown("Upload or record a clip to classify it with "
-                        "the trained model.")
+            st.markdown("Upload or record a clip to classify it.")
             pred_bytes = None
             p1, p2 = st.columns(2)
             with p1:
@@ -588,12 +617,12 @@ with tab_results:
                           f"confidence {pred['confidence']*100:.1f}%")
                 for cls, prob in sorted(pred["all"].items(),
                                          key=lambda x: -x[1]):
-                    st.progress(prob, text=f"**{cls}** — {prob*100:.1f}%")
+                    st.progress(prob,
+                                text=f"**{cls}** — {prob*100:.1f}%")
 
-        # ── compare strategies ─────────────────────────────────────────────────
+        # ── Compare strategies ────────────────────────────────────────────────
         with r4:
-            st.markdown("Run both **Feature extraction** and **Fine-tune** "
-                        "in the Training tab to compare them here.")
+            st.markdown("Run both strategies in Training to compare here.")
             rows = []
             clf_m = st.session_state.get("res_metrics_clf", [])
             ft_m  = st.session_state.get("res_metrics_ft",  [])
@@ -610,16 +639,19 @@ with tab_results:
                              "Epoch": int(best["epoch"]),
                              "Val loss": f"{best['val_loss']:.4f}"})
             if rows:
-                st.dataframe(pd.DataFrame(rows), use_container_width=True)
+                st.dataframe(pd.DataFrame(rows),
+                             use_container_width=True, hide_index=True)
                 fig = go.Figure(go.Bar(
                     x=[r["Strategy"] for r in rows],
-                    y=[float(r["Best val acc"].replace("%","")) for r in rows],
+                    y=[float(r["Best val acc"].replace("%",""))
+                       for r in rows],
                     marker=dict(color=[config.CHART_COLORS[0],
                                        config.CHART_COLORS[1]]),
                     text=[r["Best val acc"] for r in rows],
                     textposition="outside",
                 ))
-                fig.update_yaxes(range=[0, 105], title="Val accuracy (%)")
+                fig.update_yaxes(range=[0, 105],
+                                  title="Val accuracy (%)")
                 fig.update_layout(
                     paper_bgcolor="rgba(0,0,0,0)",
                     plot_bgcolor="rgba(0,0,0,0)",
@@ -628,4 +660,4 @@ with tab_results:
                 )
                 st.plotly_chart(fig, use_container_width=True)
             else:
-                st.info("No results yet. Train at least one model first.")
+                st.info("Train at least one model first.")
