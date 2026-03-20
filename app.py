@@ -3,7 +3,7 @@ app.py — YAMNet Prediction
 ==========================
 Three tabs:
   📊 Analysis  — YAMNet inference, SPL, embeddings
-  🏋️ Training  — ESC-50 / custom data, classifier, fine-tune
+  🏋️ Training  — multi-dataset selector + classifier / fine-tune
   📈 Results   — curves, confusion matrix, predict, compare
 
 Run:
@@ -17,16 +17,17 @@ import streamlit as st
 import plotly.graph_objects as go
 
 import config
-from core.audio      import load_audio, duration
-from core.model      import load_yamnet, run_inference
-from core.spl        import compute_spl, compute_spl_time
-from core.embeddings import project_with_references, has_umap
-from core.visualize  import (waveform_fig, spectrogram_fig,
-                              scores_heatmap_fig, top_n_bars_fig,
-                              spl_fig, spl_time_fig, embedding_fig,
-                              confusion_matrix_fig)
-from ui.upload            import audio_input
-from ui.metrics           import render_metrics
+from core.audio            import load_audio, duration
+from core.model            import load_yamnet, run_inference
+from core.spl              import compute_spl, compute_spl_time
+from core.embeddings       import project_with_references, has_umap
+from core.visualize        import (waveform_fig, spectrogram_fig,
+                                    scores_heatmap_fig, top_n_bars_fig,
+                                    spl_fig, spl_time_fig, embedding_fig,
+                                    confusion_matrix_fig)
+from datasets.registry import available_datasets, load_multi_dataset
+from ui.upload             import audio_input
+from ui.metrics            import render_metrics
 from ui.training_dashboard import StreamlitTrainingDashboard
 
 # ── Page config ────────────────────────────────────────────────────────────────
@@ -39,28 +40,27 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-  .block-container { padding-top: 1.5rem; padding-bottom: 1rem; }
+  .block-container { padding-top:1.5rem; padding-bottom:1rem; }
   div[data-testid="metric-container"] {
-    background: var(--secondary-background-color);
-    border-radius: 10px; padding: 12px 16px;
-    border: 1px solid rgba(128,128,128,0.15);
+    background:var(--secondary-background-color);
+    border-radius:10px; padding:12px 16px;
+    border:1px solid rgba(128,128,128,0.15);
   }
-  div[data-testid="metric-container"] label { font-size: 0.75rem !important; }
+  div[data-testid="metric-container"] label { font-size:0.75rem !important; }
   div[data-testid="stFileUploader"] {
-    border: 2px dashed rgba(139,111,71,0.4);
-    border-radius: 12px; padding: 12px;
-    background: rgba(139,111,71,0.04);
+    border:2px dashed rgba(139,111,71,0.4);
+    border-radius:12px; padding:12px;
+    background:rgba(139,111,71,0.04);
   }
   div[data-testid="stFileUploader"]:hover {
-    border-color: rgba(139,111,71,0.8);
-    background: rgba(139,111,71,0.08);
+    border-color:rgba(139,111,71,0.8);
+    background:rgba(139,111,71,0.08);
   }
   button[data-baseweb="tab"] p {
-    font-size: 1.6rem !important;
-    font-weight: 500 !important;
+    font-size:1.6rem !important; font-weight:500 !important;
   }
-  button[data-baseweb="tab"] { padding: 14px 48px !important; }
-  [data-baseweb="tab-list"] { justify-content: center !important; gap: 12px !important; }
+  button[data-baseweb="tab"] { padding:14px 48px !important; }
+  [data-baseweb="tab-list"] { justify-content:center !important; gap:12px !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -69,7 +69,7 @@ _, class_names, params = load_yamnet()
 
 # ── Header ─────────────────────────────────────────────────────────────────────
 st.markdown(f"""
-<div style="text-align:center; padding:1.5rem 0 1rem 0;">
+<div style="text-align:center;padding:1.5rem 0 1rem 0;">
   <h1 style="font-size:2.2rem;font-weight:600;margin-bottom:0.4rem;">
     {config.PAGE_ICON} {config.PAGE_TITLE}
   </h1>
@@ -241,98 +241,155 @@ with tab_analysis:
 with tab_training:
 
     st.markdown("### 🏋️ Train a custom classifier")
-    st.caption("Clips are always split at clip level before extracting embeddings "
-               "— no frames from the same clip appear in different splits.")
+    st.caption("Mix classes from multiple datasets. "
+               "Clips are always split at clip level — no frame leakage.")
     st.markdown("---")
 
-    # ── Step 1: Data source ────────────────────────────────────────────────────
-    st.markdown("#### Step 1 — Data source")
-    data_source = st.radio("Source",
-                            ["ESC-50 (download)", "My own audio folder"],
-                            horizontal=True, key="tr_source")
+    # ── Step 1: Dataset selector ───────────────────────────────────────────────
+    st.markdown("#### Step 1 — Select data")
 
-    if data_source == "ESC-50 (download)":
-        from core.esc50 import (is_downloaded, download, available_classes,
-                                 prepare_train_folder, get_metadata,
-                                 load_dataset_with_folds)
+    datasets    = available_datasets()
+    selections  = {}   # {ds_key: [selected_classes]}
+    total_clips = {}   # {ds_key: {class: count}}
 
-        if is_downloaded():
-            st.success("ESC-50 already downloaded ✓")
+    for ds in datasets:
+        downloaded = ds.is_downloaded_fn()
+
+        # dataset header row
+        col_name, col_status, col_dl = st.columns([3, 1, 1])
+        with col_name:
+            st.markdown(
+                f"<span style='font-weight:500;color:{ds.color};'>"
+                f"{ds.name}</span> "
+                f"<span style='font-size:12px;color:var(--text-color);opacity:0.6;'>"
+                f"— {ds.description}</span>",
+                unsafe_allow_html=True)
+        with col_status:
+            if downloaded:
+                st.success("✓ ready", icon=None)
+            else:
+                st.warning("not downloaded")
+        with col_dl:
+            if not downloaded:
+                if st.button(f"Download", key=f"dl_{ds.key}"):
+                    prog = st.progress(0, f"Downloading {ds.name}…")
+                    ok   = ds.download_fn(
+                        progress_callback=lambda p:
+                            prog.progress(p, f"{p*100:.0f}%"))
+                    prog.empty()
+                    if ok:
+                        st.success("Downloaded ✓"); st.rerun()
+                    else:
+                        st.error("Download failed.")
+
+        if downloaded:
+            classes = ds.classes_fn()
+            if classes:
+
+                # ── preview expander ──────────────────────────────────────
+                with st.expander(f"📊 Preview {ds.name} dataset"):
+                    try:
+                        if ds.key == "esc50":
+                            from datasets.esc50 import get_metadata
+                            df_meta  = get_metadata()
+                            col_name = "category"
+                        elif ds.key == "urbansound8k":
+                            from datasets.urbansound8k import get_metadata
+                            df_meta  = get_metadata()
+                            col_name = "class"
+                        else:
+                            df_meta, col_name = None, None
+
+                        if df_meta is not None:
+                            c1, c2, c3 = st.columns(3)
+                            c1.metric("Total clips",  len(df_meta))
+                            c2.metric("Classes",      df_meta[col_name].nunique())
+                            c3.metric("Folds",        df_meta["fold"].nunique())
+
+                            dist = df_meta[col_name].value_counts().reset_index()
+                            dist.columns = ["class", "count"]
+                            fig_bar = go.Figure(go.Bar(
+                                x=dist["class"], y=dist["count"],
+                                marker=dict(color=ds.color),
+                            ))
+                            fig_bar.update_layout(
+                                height=220,
+                                margin=dict(t=10, b=60, l=40, r=10),
+                                paper_bgcolor="rgba(0,0,0,0)",
+                                plot_bgcolor="rgba(0,0,0,0)",
+                                xaxis=dict(tickangle=-45, showgrid=False),
+                                yaxis=dict(showgrid=True,
+                                           gridcolor="rgba(128,128,128,0.12)",
+                                           title="Clips"),
+                            )
+                            st.plotly_chart(fig_bar, use_container_width=True)
+                    except Exception as e:
+                        st.caption(f"Preview not available: {e}")
+
+                # ── class selector ─────────────────────────────────────────
+                selected = st.multiselect(
+                    f"Classes from {ds.name}",
+                    classes,
+                    default=[],
+                    key=f"sel_{ds.key}",
+                    label_visibility="collapsed",
+                )
+                selections[ds.key] = selected
+
+                if selected:
+                    try:
+                        if ds.key == "esc50":
+                            from datasets.esc50 import get_metadata
+                            df_meta = get_metadata()
+                            cnt = df_meta[df_meta["category"].isin(selected)]\
+                                  ["category"].value_counts()
+                        elif ds.key == "urbansound8k":
+                            from datasets.urbansound8k import get_metadata
+                            df_meta = get_metadata()
+                            cnt = df_meta[df_meta["class"].isin(selected)]\
+                                  ["class"].value_counts()
+                        else:
+                            cnt = {}
+                        cols = st.columns(min(len(selected), 6))
+                        for i, cls in enumerate(selected):
+                            cols[i % len(cols)].metric(cls, cnt.get(cls, "?"))
+                    except Exception:
+                        pass
+            st.markdown(" ")
+
+    # Custom folder
+    st.markdown("**Custom folder** — your own audio files")
+    custom_dir = st.text_input("Folder path (one subfolder per class)",
+                                "./data/custom", key="tr_custom")
+    if os.path.isdir(custom_dir):
+        custom_classes = [d for d in os.listdir(custom_dir)
+                          if os.path.isdir(os.path.join(custom_dir, d))]
+        if custom_classes:
+            st.success(f"Found: {', '.join(sorted(custom_classes))}")
+            st.session_state["tr_custom_dir"] = custom_dir
         else:
-            st.info("~600 MB download from GitHub.")
-            if st.button("Download ESC-50", type="primary", key="tr_dl"):
-                prog = st.progress(0, "Downloading…")
-                ok   = download(progress_callback=lambda p:
-                                prog.progress(p, f"{p*100:.0f}%"))
-                prog.empty()
-                if ok:
-                    st.success("Downloaded ✓"); st.rerun()
-                else:
-                    st.error("Download failed.")
+            st.warning("No subfolders found.")
+    elif custom_dir and custom_dir != "./data/custom":
+        st.error("Folder not found.")
 
-        if is_downloaded():
-            df      = get_metadata()
-            all_cls = available_classes()
+    use_custom = (os.path.isdir(custom_dir) and
+                  bool([d for d in os.listdir(custom_dir)
+                        if os.path.isdir(os.path.join(custom_dir, d))]))
 
-            with st.expander("Browse dataset"):
-                dist = df["category"].value_counts().reset_index()
-                dist.columns = ["class","count"]
-                fig_bar = go.Figure(go.Bar(
-                    x=dist["class"], y=dist["count"],
-                    marker=dict(color=config.CHART_COLORS[0])))
-                fig_bar.update_layout(
-                    height=200, margin=dict(t=10,b=60,l=40,r=10),
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    plot_bgcolor="rgba(0,0,0,0)",
-                    xaxis=dict(tickangle=-45))
-                st.plotly_chart(fig_bar, use_container_width=True)
+    # Summary of selected classes
+    all_selected = []
+    for ds_key, classes in selections.items():
+        for cls in classes:
+            all_selected.append(f"{cls} ({ds_key})")
+    if use_custom:
+        custom_classes = [d for d in os.listdir(custom_dir)
+                          if os.path.isdir(os.path.join(custom_dir, d))]
+        all_selected += [f"{c} (custom)" for c in custom_classes]
 
-            preset = st.selectbox("Quick preset", [
-                "Custom selection",
-                "Animals (dog, cat, crow, rooster, hen)",
-                "Nature (rain, sea_waves, crackling_fire, crickets, chirping_birds)",
-                "Urban (chainsaw, airplane, helicopter, train, hand_saw)",
-                "Human (crying_baby, laughing, clapping, sneezing, coughing)",
-            ], key="tr_preset")
-
-            preset_map = {
-                "Animals (dog, cat, crow, rooster, hen)":
-                    ["dog","cat","crow","rooster","hen"],
-                "Nature (rain, sea_waves, crackling_fire, crickets, chirping_birds)":
-                    ["rain","sea_waves","crackling_fire","crickets","chirping_birds"],
-                "Urban (chainsaw, airplane, helicopter, train, hand_saw)":
-                    ["chainsaw","airplane","helicopter","train","hand_saw"],
-                "Human (crying_baby, laughing, clapping, sneezing, coughing)":
-                    ["crying_baby","laughing","clapping","sneezing","coughing"],
-            }
-            default  = preset_map.get(preset, ["dog","cat"])
-            selected = st.multiselect("Classes", all_cls, default=default,
-                                       key="tr_classes")
-
-            if selected:
-                cnt  = df[df["category"].isin(selected)]["category"].value_counts()
-                cols = st.columns(min(len(selected), 6))
-                for i, cls in enumerate(selected):
-                    cols[i % len(cols)].metric(cls, cnt.get(cls, 0))
-                st.info("ESC-50 folds: **1-3 = train · 4 = val · 5 = test**")
-                st.session_state["tr_selected_classes"] = selected
-                st.session_state["tr_use_esc50_folds"]  = True
-
-    else:
-        st.info("Point to a folder with one subfolder per class:\n"
-                "`my_data/dog/*.wav`, `my_data/cat/*.wav`, etc.")
-        custom_dir = st.text_input("Folder path", "./data/train",
-                                    key="tr_custom")
-        if os.path.isdir(custom_dir):
-            classes_found = [d for d in os.listdir(custom_dir)
-                             if os.path.isdir(os.path.join(custom_dir, d))]
-            if classes_found:
-                st.success(f"Found {len(classes_found)} classes: "
-                           f"{', '.join(sorted(classes_found))}")
-                st.session_state["tr_data_dir"]        = custom_dir
-                st.session_state["tr_use_esc50_folds"] = False
-        elif custom_dir:
-            st.error("Folder not found.")
+    if all_selected:
+        st.markdown("---")
+        st.markdown(f"**Selected:** {' · '.join(all_selected)}")
+        st.caption(f"{len(all_selected)} classes total")
 
     st.markdown("---")
 
@@ -340,16 +397,13 @@ with tab_training:
     st.markdown("#### Step 2 — Training mode")
     train_mode = st.radio(
         "Mode", ["Feature extraction", "Fine-tune YAMNet"],
-        horizontal=True, key="tr_mode",
-        help="Feature extraction: frozen YAMNet + dense head. "
-             "Fine-tune: unfreeze last N YAMNet layers.")
+        horizontal=True, key="tr_mode")
 
     c1, c2 = st.columns(2)
     with c1:
         epochs     = st.slider("Max epochs", 5, 100, 20, key="tr_epochs")
-        use_frames = st.toggle(
-            "Use all frames per clip (Google tutorial style)",
-            value=True, key="tr_frames")
+        use_frames = st.toggle("Use all frames per clip (Google style)",
+                                value=True, key="tr_frames")
         out_model  = st.text_input(
             "Save model to",
             "./models/classifier" if train_mode == "Feature extraction"
@@ -379,46 +433,56 @@ with tab_training:
     # ── Step 3: Train ──────────────────────────────────────────────────────────
     st.markdown("#### Step 3 — Train")
 
-    ready = st.session_state.get("tr_use_esc50_folds") is not None
-    if not ready:
-        st.warning("Complete Step 1 first.")
+    any_selected = any(v for v in selections.values()) or use_custom
+    if not any_selected:
+        st.warning("Select at least one class from any dataset above.")
     else:
-        use_esc50 = st.session_state.get("tr_use_esc50_folds", False)
-
         if st.button("🚀 Start training", type="primary", key="tr_run"):
             from core.classifier import (train, get_report, save_model,
                                           load_dataset_from_folder)
 
-            if use_esc50:
-                from core.esc50 import load_dataset_with_folds
-                selected = st.session_state["tr_selected_classes"]
-                st.info(f"Loading ESC-50: {selected}")
-                prog = st.progress(0, "Loading audio…")
-                waveforms, labels, folds = load_dataset_with_folds(
-                    selected,
-                    progress_callback=lambda i,t:
-                        prog.progress(i/t, f"Loading {i}/{t}…"))
+            # load from registered datasets
+            waveforms, labels, folds = [], [], []
+
+            if any(v for v in selections.values()):
+                prog = st.progress(0, "Loading datasets…")
+
+                def _prog(ds_key, i, t):
+                    prog.progress(i/max(t,1),
+                                  f"Loading {ds_key}: {i}/{t}…")
+
+                wf, lb, fo = load_multi_dataset(
+                    selections, progress_callback=_prog)
+                waveforms.extend(wf)
+                labels.extend(lb)
+                folds.extend(fo)
                 prog.empty()
-            else:
-                data_dir  = st.session_state["tr_data_dir"]
-                waveforms, labels = load_dataset_from_folder(data_dir)
+
+            # load custom folder (no folds — will use 70/15/15)
+            if use_custom:
+                wf_c, lb_c = load_dataset_from_folder(custom_dir)
+                waveforms.extend(wf_c)
+                labels.extend(lb_c)
+                # no folds for custom — split_by_clip handles None
+                folds.extend([None] * len(wf_c))
+
+            # if mixing folds + custom, set folds to None so split is random
+            if any(f is None for f in folds):
                 folds = None
 
             if not waveforms:
                 st.error("No audio files found."); st.stop()
 
             classes = sorted(set(labels))
-            st.success(f"Loaded {len(waveforms)} clips · "
-                       f"{len(classes)} classes: {classes}")
+            st.success(f"Loaded **{len(waveforms)} clips** · "
+                       f"**{len(classes)} classes**: {classes}")
 
-            # ── Live training dashboard ────────────────────────────────────────
+            # live training dashboard
             st.markdown("##### Training progress")
-            dashboard_container = st.container()
             dashboard = StreamlitTrainingDashboard(
                 total_epochs=epochs,
-                container=dashboard_container,
+                container=st.container(),
             )
-
             metrics_list = []
 
             if train_mode == "Feature extraction":
@@ -464,9 +528,8 @@ with tab_training:
                 "res_le":       le,
                 "res_trained":  True,
             })
-
             test_acc  = report.get("test_accuracy", "—")
-            test_loss = report.get("test_loss", "—")
+            test_loss = report.get("test_loss",     "—")
             st.success(
                 f"✅ Done! Test accuracy: **{test_acc}%** · "
                 f"Test loss: **{test_loss}** → go to **📈 Results**")
@@ -500,90 +563,83 @@ with tab_results:
             "⚖️ Compare strategies",
         ])
 
-        # ── Training curves ─────────────────────────────────────────────────
+        # ── Training curves ────────────────────────────────────────────────────
         with r1:
-          if metrics:
-              df   = pd.DataFrame(metrics)
-              best = df.loc[df["val_acc"].idxmax()]
-              c1, c2, c3 = st.columns(3)
-              c1.metric("Best val accuracy", f"{best['val_acc']:.1f}%")
-              c2.metric("At epoch",          int(best["epoch"]))
-              c3.metric("Val loss",          f"{best['val_loss']:.4f}")
+            if metrics:
+                df   = pd.DataFrame(metrics)
+                best = df.loc[df["val_acc"].idxmax()]
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Best val accuracy", f"{best['val_acc']:.1f}%")
+                c2.metric("At epoch",          int(best["epoch"]))
+                c3.metric("Val loss",          f"{best['val_loss']:.4f}")
 
-              col_acc, col_loss = st.columns(2)
+                col_acc, col_loss = st.columns(2)
+                with col_acc:
+                    fig_acc = go.Figure()
+                    fig_acc.add_trace(go.Scatter(
+                        x=df["epoch"], y=df["acc"],
+                        name="Train", mode="lines+markers",
+                        line=dict(color="#1f77b4", width=2),
+                        marker=dict(size=5)))
+                    fig_acc.add_trace(go.Scatter(
+                        x=df["epoch"], y=df["val_acc"],
+                        name="Val", mode="lines+markers",
+                        line=dict(color="#ff7f0e", width=2),
+                        marker=dict(size=5)))
+                    fig_acc.update_layout(
+                        title="Accuracy (%)",
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        plot_bgcolor="rgba(0,0,0,0)",
+                        height=300,
+                        margin=dict(t=40,b=40,l=50,r=20),
+                        xaxis=dict(title="Epoch", showgrid=True,
+                                   gridcolor="rgba(128,128,128,0.12)"),
+                        yaxis=dict(title="Accuracy (%)", showgrid=True,
+                                   gridcolor="rgba(128,128,128,0.12)"),
+                        legend=dict(orientation="h", y=-0.2))
+                    st.plotly_chart(fig_acc, use_container_width=True)
 
-              with col_acc:
-                  fig_acc = go.Figure()
-                  fig_acc.add_trace(go.Scatter(
-                      x=df["epoch"], y=df["acc"],
-                      name="Train", mode="lines+markers",
-                      line=dict(color="#1f77b4", width=2),
-                      marker=dict(size=5),
-                  ))
-                  fig_acc.add_trace(go.Scatter(
-                      x=df["epoch"], y=df["val_acc"],
-                      name="Val", mode="lines+markers",
-                      line=dict(color="#ff7f0e", width=2),
-                      marker=dict(size=5),
-                  ))
-                  fig_acc.update_layout(
-                      title="Accuracy (%)",
-                      paper_bgcolor="rgba(0,0,0,0)",
-                      plot_bgcolor="rgba(0,0,0,0)",
-                      height=300,
-                      margin=dict(t=40, b=40, l=50, r=20),
-                      xaxis=dict(title="Epoch", showgrid=True,
-                                gridcolor="rgba(128,128,128,0.12)"),
-                      yaxis=dict(title="Accuracy (%)", showgrid=True,
-                                gridcolor="rgba(128,128,128,0.12)"),
-                      legend=dict(orientation="h", y=-0.2),
-                  )
-                  st.plotly_chart(fig_acc, use_container_width=True)
+                with col_loss:
+                    fig_loss = go.Figure()
+                    fig_loss.add_trace(go.Scatter(
+                        x=df["epoch"], y=df["loss"],
+                        name="Train", mode="lines+markers",
+                        line=dict(color="#1f77b4", width=2),
+                        marker=dict(size=5)))
+                    fig_loss.add_trace(go.Scatter(
+                        x=df["epoch"], y=df["val_loss"],
+                        name="Val", mode="lines+markers",
+                        line=dict(color="#ff7f0e", width=2),
+                        marker=dict(size=5)))
+                    fig_loss.update_layout(
+                        title="Loss",
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        plot_bgcolor="rgba(0,0,0,0)",
+                        height=300,
+                        margin=dict(t=40,b=40,l=50,r=20),
+                        xaxis=dict(title="Epoch", showgrid=True,
+                                   gridcolor="rgba(128,128,128,0.12)"),
+                        yaxis=dict(title="Loss", showgrid=True,
+                                   gridcolor="rgba(128,128,128,0.12)"),
+                        legend=dict(orientation="h", y=-0.2))
+                    st.plotly_chart(fig_loss, use_container_width=True)
 
-              with col_loss:
-                  fig_loss = go.Figure()
-                  fig_loss.add_trace(go.Scatter(
-                      x=df["epoch"], y=df["loss"],
-                      name="Train", mode="lines+markers",
-                      line=dict(color="#1f77b4", width=2),
-                      marker=dict(size=5),
-                  ))
-                  fig_loss.add_trace(go.Scatter(
-                      x=df["epoch"], y=df["val_loss"],
-                      name="Val", mode="lines+markers",
-                      line=dict(color="#ff7f0e", width=2),
-                      marker=dict(size=5),
-                  ))
-                  fig_loss.update_layout(
-                      title="Loss",
-                      paper_bgcolor="rgba(0,0,0,0)",
-                      plot_bgcolor="rgba(0,0,0,0)",
-                      height=300,
-                      margin=dict(t=40, b=40, l=50, r=20),
-                      xaxis=dict(title="Epoch", showgrid=True,
-                                gridcolor="rgba(128,128,128,0.12)"),
-                      yaxis=dict(title="Loss", showgrid=True,
-                                gridcolor="rgba(128,128,128,0.12)"),
-                      legend=dict(orientation="h", y=-0.2),
-                  )
-                  st.plotly_chart(fig_loss, use_container_width=True)
+                st.dataframe(
+                    df.rename(columns={
+                        "epoch":"Epoch","acc":"Train acc %",
+                        "val_acc":"Val acc %","loss":"Train loss",
+                        "val_loss":"Val loss"})
+                    .style
+                    .highlight_max(subset=["Val acc %"], color="#d4edda")
+                    .highlight_min(subset=["Val loss"],  color="#d4edda"),
+                    use_container_width=True, hide_index=True)
 
-              st.dataframe(
-                  df.rename(columns={
-                      "epoch":"Epoch","acc":"Train acc %",
-                      "val_acc":"Val acc %","loss":"Train loss",
-                      "val_loss":"Val loss"})
-                  .style.highlight_max(subset=["Val acc %"], color="#d4edda")
-                        .highlight_min(subset=["Val loss"],  color="#d4edda"),
-                  use_container_width=True, hide_index=True)
-
-        # ── Confusion matrix ─────────────────────────────────────────────────
+        # ── Confusion matrix ───────────────────────────────────────────────────
         with r2:
             if cm:
                 st.plotly_chart(
                     confusion_matrix_fig(cm, classes),
                     use_container_width=True)
-
                 rows = [{"Class": c,
                          "Precision": f"{report[c]['precision']:.2f}",
                          "Recall":    f"{report[c]['recall']:.2f}",
@@ -593,7 +649,7 @@ with tab_results:
                 st.dataframe(pd.DataFrame(rows),
                              use_container_width=True, hide_index=True)
 
-        # ── Predict new audio ─────────────────────────────────────────────────
+        # ── Predict new audio ──────────────────────────────────────────────────
         with r3:
             st.markdown("Upload or record a clip to classify it.")
             pred_bytes = None
@@ -620,9 +676,8 @@ with tab_results:
                     st.progress(prob,
                                 text=f"**{cls}** — {prob*100:.1f}%")
 
-        # ── Compare strategies ────────────────────────────────────────────────
+        # ── Compare strategies ─────────────────────────────────────────────────
         with r4:
-            st.markdown("Run both strategies in Training to compare here.")
             rows = []
             clf_m = st.session_state.get("res_metrics_clf", [])
             ft_m  = st.session_state.get("res_metrics_ft",  [])
@@ -645,19 +700,15 @@ with tab_results:
                     x=[r["Strategy"] for r in rows],
                     y=[float(r["Best val acc"].replace("%",""))
                        for r in rows],
-                    marker=dict(color=[config.CHART_COLORS[0],
-                                       config.CHART_COLORS[1]]),
+                    marker=dict(color=["#1f77b4","#ff7f0e"]),
                     text=[r["Best val acc"] for r in rows],
-                    textposition="outside",
-                ))
-                fig.update_yaxes(range=[0, 105],
-                                  title="Val accuracy (%)")
+                    textposition="outside"))
+                fig.update_yaxes(range=[0, 105], title="Val accuracy (%)")
                 fig.update_layout(
                     paper_bgcolor="rgba(0,0,0,0)",
                     plot_bgcolor="rgba(0,0,0,0)",
-                    margin=dict(t=20, b=40, l=50, r=20),
-                    height=280,
-                )
+                    margin=dict(t=20,b=40,l=50,r=20),
+                    height=280)
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info("Train at least one model first.")
