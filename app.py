@@ -252,30 +252,81 @@ with tab_training:
     selections  = {}   # {ds_key: [selected_classes]}
     total_clips = {}   # {ds_key: {class: count}}
 
+    ds_versions = {}   # {ds_key: selected_version}
+
     for ds in datasets:
-        downloaded = ds.is_downloaded_fn()
+
+        # ── version selector (for datasets that support it) ────────────────────
+        version = ds.default_version
+        if ds.versions_fn is not None:
+            ver_options = ds.versions_fn()
+            ver_keys    = list(ver_options.keys())
+            ver_labels  = list(ver_options.values())
+            # add "All versions" option
+            ver_keys_ui   = ["all"] + ver_keys
+            ver_labels_ui = ["All (download all versions)"] + ver_labels
+            chosen = st.selectbox(
+                f"{ds.name} version",
+                ver_keys_ui,
+                format_func=lambda x, vl=ver_labels_ui, vk=ver_keys_ui:
+                    vl[vk.index(x)],
+                index=ver_keys_ui.index(ds.default_version)
+                      if ds.default_version in ver_keys_ui else 0,
+                key=f"ver_{ds.key}",
+                label_visibility="collapsed",
+            )
+            version = chosen
+            ds_versions[ds.key] = version
+
+        # check downloaded for selected version
+        try:
+            downloaded = (ds.is_downloaded_fn(version)
+                          if version and version != "all"
+                          else any(ds.is_downloaded_fn(v)
+                                   for v in (ds.versions_fn() or {}).keys()))
+        except TypeError:
+            downloaded = ds.is_downloaded_fn()
 
         # dataset header row
         col_name, col_status, col_dl = st.columns([3, 1, 1])
         with col_name:
+            name_color = "#1D9E75" if downloaded else "#185FA5"
             st.markdown(
-                f"<span style='font-weight:500;color:{ds.color};'>"
+                f"<span style='font-weight:500;color:{name_color};'>"
                 f"{ds.name}</span> "
                 f"<span style='font-size:12px;color:var(--text-color);opacity:0.6;'>"
                 f"— {ds.description}</span>",
                 unsafe_allow_html=True)
         with col_status:
             if downloaded:
-                st.success("✓ ready", icon=None)
+                st.success("✓ ready")
             else:
                 st.warning("not downloaded")
         with col_dl:
             if not downloaded:
-                if st.button(f"Download", key=f"dl_{ds.key}"):
+                if st.button("Download", key=f"dl_{ds.key}"):
                     prog = st.progress(0, f"Downloading {ds.name}…")
-                    ok   = ds.download_fn(
-                        progress_callback=lambda p:
-                            prog.progress(p, f"{p*100:.0f}%"))
+                    # download all versions if "all" selected
+                    versions_to_dl = (
+                        list((ds.versions_fn() or {}).keys())
+                        if version == "all"
+                        else [version] if version else [None]
+                    )
+                    ok = True
+                    for v in versions_to_dl:
+                        try:
+                            result = ds.download_fn(
+                                progress_callback=lambda p:
+                                    prog.progress(p, f"{p*100:.0f}%"),
+                                version=v,
+                            ) if v else ds.download_fn(
+                                progress_callback=lambda p:
+                                    prog.progress(p, f"{p*100:.0f}%"))
+                            ok = ok and result
+                        except TypeError:
+                            ok = ds.download_fn(
+                                progress_callback=lambda p:
+                                    prog.progress(p, f"{p*100:.0f}%"))
                     prog.empty()
                     if ok:
                         st.success("Downloaded ✓"); st.rerun()
@@ -283,79 +334,80 @@ with tab_training:
                         st.error("Download failed.")
 
         if downloaded:
-            classes = ds.classes_fn()
-            if classes:
+            # resolve which version to show classes for
+            show_version = (version if version != "all"
+                            else ds.default_version)
+            try:
+                classes = (ds.classes_fn(show_version)
+                           if show_version else ds.classes_fn())
+            except TypeError:
+                classes = ds.classes_fn()
 
-                # ── preview expander ──────────────────────────────────────
+            if classes:
+                # ── preview expander ──────────────────────────────────────────
                 with st.expander(f"📊 Preview {ds.name} dataset"):
                     try:
                         if ds.key == "esc50":
                             from datasets.esc50 import get_metadata
-                            df_meta  = get_metadata()
-                            col_name = "category"
+                            df_meta, label_col = get_metadata(), "category"
                         elif ds.key == "urbansound8k":
                             from datasets.urbansound8k import get_metadata
-                            df_meta  = get_metadata()
-                            col_name = "class"
+                            df_meta, label_col = get_metadata(), "class"
+                        elif ds.key == "dcase2020t1":
+                            from datasets.dcase2020t1 import get_metadata
+                            df_meta, label_col = get_metadata(show_version), "category"
                         else:
-                            df_meta, col_name = None, None
+                            df_meta, label_col = None, None
 
                         if df_meta is not None:
                             c1, c2, c3 = st.columns(3)
                             c1.metric("Total clips",  len(df_meta))
-                            c2.metric("Classes",      df_meta[col_name].nunique())
-                            c3.metric("Folds",        df_meta["fold"].nunique())
-
-                            dist = df_meta[col_name].value_counts().reset_index()
-                            dist.columns = ["class", "count"]
+                            c2.metric("Classes",      df_meta[label_col].nunique())
+                            c3.metric("Pseudo-folds", df_meta["fold"].nunique()
+                                      if "fold" in df_meta.columns else "—")
+                            dist = df_meta[label_col].value_counts().reset_index()
+                            dist.columns = ["class","count"]
                             fig_bar = go.Figure(go.Bar(
                                 x=dist["class"], y=dist["count"],
-                                marker=dict(color=ds.color),
-                            ))
+                                marker=dict(color=ds.color)))
                             fig_bar.update_layout(
                                 height=220,
-                                margin=dict(t=10, b=60, l=40, r=10),
+                                margin=dict(t=10,b=60,l=40,r=10),
                                 paper_bgcolor="rgba(0,0,0,0)",
                                 plot_bgcolor="rgba(0,0,0,0)",
                                 xaxis=dict(tickangle=-45, showgrid=False),
-                                yaxis=dict(showgrid=True,
-                                           gridcolor="rgba(128,128,128,0.12)",
-                                           title="Clips"),
-                            )
+                                yaxis=dict(title="Clips", showgrid=True,
+                                           gridcolor="rgba(128,128,128,0.12)"))
                             st.plotly_chart(fig_bar, use_container_width=True)
                     except Exception as e:
                         st.caption(f"Preview not available: {e}")
 
-                # ── class selector ─────────────────────────────────────────
-                selected = st.multiselect(
+                # ── class selector ────────────────────────────────────────────
+                all_option = ["— All classes —"] + classes
+                selected_raw = st.multiselect(
                     f"Classes from {ds.name}",
-                    classes,
+                    all_option,
                     default=[],
                     key=f"sel_{ds.key}",
                     label_visibility="collapsed",
                 )
+                # expand "All" selection
+                selected = (classes if "— All classes —" in selected_raw
+                            else [c for c in selected_raw
+                                  if c != "— All classes —"])
                 selections[ds.key] = selected
 
                 if selected:
                     try:
-                        if ds.key == "esc50":
-                            from datasets.esc50 import get_metadata
-                            df_meta = get_metadata()
-                            cnt = df_meta[df_meta["category"].isin(selected)]\
-                                  ["category"].value_counts()
-                        elif ds.key == "urbansound8k":
-                            from datasets.urbansound8k import get_metadata
-                            df_meta = get_metadata()
-                            cnt = df_meta[df_meta["class"].isin(selected)]\
-                                  ["class"].value_counts()
-                        else:
-                            cnt = {}
+                        cnt  = df_meta[df_meta[label_col].isin(selected)]\
+                               [label_col].value_counts()
                         cols = st.columns(min(len(selected), 6))
                         for i, cls in enumerate(selected):
                             cols[i % len(cols)].metric(cls, cnt.get(cls, "?"))
                     except Exception:
                         pass
-            st.markdown(" ")
+
+        st.markdown(" ")
 
     # Custom folder
     st.markdown("**Custom folder** — your own audio files")
@@ -452,7 +504,9 @@ with tab_training:
                                   f"Loading {ds_key}: {i}/{t}…")
 
                 wf, lb, fo = load_multi_dataset(
-                    selections, progress_callback=_prog)
+                    selections,
+                    versions=ds_versions,
+                    progress_callback=_prog)
                 waveforms.extend(wf)
                 labels.extend(lb)
                 folds.extend(fo)
